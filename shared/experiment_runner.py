@@ -3,6 +3,7 @@
 """
 import pandas as pd
 import numpy as np
+import time
 from typing import Dict, Any, Tuple
 from sklearn.model_selection import train_test_split
 
@@ -11,7 +12,7 @@ from data.data_generator import generate_synthetic_data
 from shared.model import train_causal_tree, estimate_cate, create_model
 from shared.imbalance_handler import UpliftUndersampler
 from shared.experiment_config import ExperimentConfig
-from evaluation.evaluation import evaluate_cate_estimation
+from evaluation.evaluation import evaluate_cate_estimation, CATEEvaluator
 
 
 class ExperimentRunner:
@@ -28,6 +29,8 @@ class ExperimentRunner:
     
     def run_single_experiment(self) -> Dict[str, Any]:
         """単一の実験を実行"""
+        start_time = time.time()
+        
         print(f"Starting CATE estimation experiment...")
         print(f"Configuration:\n{self.config.summary()}")
         
@@ -46,7 +49,10 @@ class ExperimentRunner:
         pred_cate = self._predict_cate(model, test_data["X"])
         
         # 5. 評価
-        evaluation_results = self._evaluate_predictions(test_data["true_cate"], pred_cate)
+        evaluation_results = self._evaluate_predictions(test_data["true_cate"], pred_cate, test_data)
+        
+        # 実行時間計算
+        runtime = time.time() - start_time
         
         # 結果をまとめる
         results = {
@@ -59,6 +65,7 @@ class ExperimentRunner:
                 "train_positive_rate": np.mean(Y_train)
             },
             "evaluation": evaluation_results,
+            "runtime": runtime,
             "predictions": {
                 "predicted_cate": pred_cate,
                 "true_cate": test_data["true_cate"]
@@ -139,8 +146,7 @@ class ExperimentRunner:
         
         print(f"After undersampling: {len(X_resampled)} samples")
         print(f"Positive rate change: {np.mean(Y_train):.4f} → {np.mean(Y_resampled):.4f}")
-        
-        # undersamplerを保存（予測補正用）
+          # undersamplerを保存（予測補正用）
         self.undersampler = undersampler
         
         return X_resampled, T_resampled, Y_resampled
@@ -188,14 +194,57 @@ class ExperimentRunner:
         
         return pred_cate
     
-    def _evaluate_predictions(self, true_cate: np.ndarray, pred_cate: np.ndarray) -> Dict[str, float]:
+    def _evaluate_predictions(self, true_cate: np.ndarray, pred_cate: np.ndarray, 
+                            test_data: Dict[str, Any] = None) -> Dict[str, float]:
         """予測結果の評価"""
         print("\nStep 5: Evaluating CATE estimation...")
         
-        evaluation_results = evaluate_cate_estimation(true_cate, pred_cate)
+        # QINI評価が有効かチェック
+        enable_qini = getattr(self.config, 'enable_qini', False) and test_data is not None
+        
+        if enable_qini:
+            # 拡張評価（QINI含む）
+            evaluator = CATEEvaluator(enable_qini=True)
+            
+            # 反実仮想データがあるかチェック（人工データの場合）
+            y_counterfactual = None
+            if hasattr(self.config, 'data_source') and self.config.data_source == "synthetic":
+                # 人工データの場合、反実仮想を計算
+                y_counterfactual = self._generate_counterfactual_outcomes(test_data)
+            
+            evaluation_results = evaluator.evaluate_cate_estimation(
+                true_cate, 
+                pred_cate,
+                y_true=test_data.get("Y") if test_data else None,
+                treatment=test_data.get("T") if test_data else None,
+                y_counterfactual=y_counterfactual,
+                verbose=True
+            )
+        else:
+            # 基本評価のみ
+            evaluation_results = evaluate_cate_estimation(true_cate, pred_cate)
         
         print("Evaluation complete.")
         return evaluation_results
+    
+    def _generate_counterfactual_outcomes(self, test_data: Dict[str, Any]) -> np.ndarray:
+        """反実仮想の結果を生成（人工データ用）"""
+        try:
+            # 処置を反転させて反実仮想を計算
+            X_test = test_data["X"]
+            T_test = test_data["T"]
+            Y_test = test_data["Y"]
+            true_cate = test_data["true_cate"]
+            
+            # 反実仮想 = 観測結果 - (処置 * 真のCATE - (1-処置) * 真のCATE)
+            # = 観測結果 - 真のCATE * (2*処置 - 1)
+            y_counterfactual = Y_test - true_cate * (2 * T_test - 1)
+            
+            return y_counterfactual
+            
+        except Exception as e:
+            print(f"Warning: Could not generate counterfactual outcomes: {e}")
+            return None
 
 
 class ComparisonExperiment:

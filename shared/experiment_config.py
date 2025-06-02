@@ -2,7 +2,7 @@
 実験設定の管理モジュール
 """
 from dataclasses import dataclass
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 
 @dataclass
@@ -14,6 +14,7 @@ class ExperimentConfig:
     test_size: float = 0.3
     random_seed: int = 42
     reward_type: str = "linear"  # "linear", "logistic", "tree"
+    data_source: str = "synthetic"  # "synthetic", "criteo"
     
     # アンダーサンプリング設定
     use_undersampling: bool = False
@@ -21,6 +22,9 @@ class ExperimentConfig:
     
     # モデル設定
     model_type: str = "causal_tree"  # "causal_tree", "s_learner", "t_learner", etc.
+    
+    # 評価設定
+    enable_qini: bool = True  # QINI係数計算の有効化
     
     # モデル固有パラメータ
     model_params: Optional[Dict[str, Any]] = None
@@ -121,3 +125,54 @@ def get_config(preset_name: str) -> ExperimentConfig:
 def create_custom_config(**kwargs) -> ExperimentConfig:
     """カスタム設定を作成"""
     return ExperimentConfig(**kwargs)
+
+
+def create_config_from_cli(cli_config) -> List[ExperimentConfig]:
+    """CLIConfigからExperimentConfigのリストを作成
+    
+    複数のCATEメソッドとk値の組み合わせでExperimentConfigを生成
+    """
+    from .cli_parser import CLIConfig
+    
+    if not isinstance(cli_config, CLIConfig):
+        raise ValueError("cli_config must be a CLIConfig instance")
+    
+    configs = []
+    
+    for method in cli_config.cate_methods:
+        for k_value in cli_config.k_values:
+            # k_valueが0の場合はアンダーサンプリングを無効化
+            use_undersampling = k_value > 0
+            k_factor = float(k_value) if k_value > 0 else 2.0
+            
+            config = ExperimentConfig(
+                n_samples=cli_config.n_samples,
+                test_size=cli_config.test_size,
+                random_seed=cli_config.random_seed,
+                reward_type=cli_config.reward_type,
+                data_source=cli_config.data_source,
+                use_undersampling=use_undersampling,
+                k_factor=k_factor,
+                model_type=method,
+                enable_qini=cli_config.enable_qini and cli_config.data_source == "synthetic"
+            )
+            configs.append(config)
+    
+    return configs
+
+
+def validate_cli_config_compatibility(cli_config) -> bool:
+    """CLIConfigの設定が実験システムと互換性があるかチェック"""
+    from .cli_parser import CLIConfig
+    
+    if not isinstance(cli_config, CLIConfig):
+        return False
+    
+    # Criteoデータでの制限事項をチェック
+    if cli_config.data_source == "criteo":
+        if cli_config.enable_qini:
+            print("警告: CriteoデータではQINI係数は計算されません")
+        if cli_config.reward_type != "linear":
+            print("警告: Criteoデータでは報酬タイプ設定は無視されます")
+    
+    return True
